@@ -1,10 +1,12 @@
-Reply only in json with the following format:
+Reply only in json with the following format, regarding the next step you need to take in order to complete the task. 
+Divide each task in to smaller steps, every step can use a maximum of one ability. The final step should always be the finishing step that uses the finish ability. Each response of yours should represent only one step of the process.
+If the ability was run an extra key "output: will be added under ability with the result', you can use the output from previous steps as input for your current ability if needed:
 
 {
     \"thoughts\": {
         \"text\":  \"thoughts\",
         \"reasoning\": \"reasoning behind thoughts\",
-        \"plan\": \"- short bulleted\\n- list that conveys\\n- long-term plan\",
+        \"plan\": \"- short bulleted\\n- list that conveys\\n- your plan\",
         \"criticism\": \"constructive self-criticism\",
         \"speak\": \"thoughts summary to say to user\",
     },

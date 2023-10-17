@@ -14,132 +14,144 @@ from forge.sdk import (
     chat_completion_request,
 )
 
+
+
 LOG = ForgeLogger(__name__)
 
 
 class ForgeAgent(Agent):
-    """
-    The goal of the Forge is to take care of the boilerplate code so you can focus on
-    agent design.
-
-    There is a great paper surveying the agent landscape: https://arxiv.org/abs/2308.11432
-    Which I would highly recommend reading as it will help you understand the possabilities.
-
-    Here is a summary of the key components of an agent:
-
-    Anatomy of an agent:
-         - Profile
-         - Memory
-         - Planning
-         - Action
-
-    Profile:
-
-    Agents typically perform a task by assuming specific roles. For example, a teacher,
-    a coder, a planner etc. In using the profile in the llm prompt it has been shown to
-    improve the quality of the output. https://arxiv.org/abs/2305.14688
-
-    Additionally baed on the profile selected, the agent could be configured to use a
-    different llm. The possabilities are endless and the profile can be selected selected
-    dynamically based on the task at hand.
-
-    Memory:
-
-    Memory is critical for the agent to acculmulate experiences, self-evolve, and behave
-    in a more consistent, reasonable, and effective manner. There are many approaches to
-    memory. However, some thoughts: there is long term and short term or working memory.
-    You may want different approaches for each. There has also been work exploring the
-    idea of memory reflection, which is the ability to assess its memories and re-evaluate
-    them. For example, condensting short term memories into long term memories.
-
-    Planning:
-
-    When humans face a complex task, they first break it down into simple subtasks and then
-    solve each subtask one by one. The planning module empowers LLM-based agents with the ability
-    to think and plan for solving complex tasks, which makes the agent more comprehensive,
-    powerful, and reliable. The two key methods to consider are: Planning with feedback and planning
-    without feedback.
-
-    Action:
-
-    Actions translate the agents decisions into specific outcomes. For example, if the agent
-    decides to write a file, the action would be to write the file. There are many approaches you
-    could implement actions.
-
-    The Forge has a basic module for each of these areas. However, you are free to implement your own.
-    This is just a starting point.
-    """
 
     def __init__(self, database: AgentDB, workspace: Workspace):
-        """
-        The database is used to store tasks, steps and artifact metadata. The workspace is used to
-        store artifacts. The workspace is a directory on the file system.
-
-        Feel free to create subclasses of the database and workspace to implement your own storage
-        """
         super().__init__(database, workspace)
 
-    async def create_task(self, task_request: TaskRequestBody) -> Task:
+    def safe_json_dumps(self, data):
         """
-        The agent protocol, which is the core of the Forge, works by creating a task and then
-        executing steps for that task. This method is called when the agent is asked to create
-        a task.
+        Convert data into a JSON string, ensuring bytes are decoded.
+        """
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if isinstance(value, bytes):
+                    data[key] = value.decode('utf-8')
+        elif isinstance(data, bytes):
+            data = data.decode('utf-8')
+        
+        return json.dumps(data)
 
-        We are hooking into function to add a custom log message. Though you can do anything you
-        want here.
-        """
+
+    async def create_task(self, task_request: TaskRequestBody) -> Task:
         task = await super().create_task(task_request)
+        self.messages = [] 
+
         LOG.info(
             f"📦 Task created: {task.task_id} input: {task.input[:40]}{'...' if len(task.input) > 40 else ''}"
         )
         return task
+    
 
     async def execute_step(self, task_id: str, step_request: StepRequestBody) -> Step:
-        """
-        For a tutorial on how to add your own logic please see the offical tutorial series:
-        https://aiedge.medium.com/autogpt-forge-e3de53cc58ec
-
-        The agent protocol, which is the core of the Forge, works by creating a task and then
-        executing steps for that task. This method is called when the agent is asked to execute
-        a step.
-
-        The task that is created contains an input string, for the bechmarks this is the task
-        the agent has been asked to solve and additional input, which is a dictionary and
-        could contain anything.
-
-        If you want to get the task use:
-
-        ```
         task = await self.db.get_task(task_id)
-        ```
+        print(f"\n\n\ntask: {task} step request: {step_request}")
 
-        The step request body is essentailly the same as the task request and contains an input
-        string, for the bechmarks this is the task the agent has been asked to solve and
-        additional input, which is a dictionary and could contain anything.
-
-        You need to implement logic that will take in this step input and output the completed step
-        as a step object. You can do everything in a single step or you can break it down into
-        multiple steps. Returning a request to continue in the step output, the user can then decide
-        if they want the agent to continue or not.
-        """
-        # An example that
-        step = await self.db.create_step(
-            task_id=task_id, input=step_request, is_last=True
-        )
-
-        self.workspace.write(task_id=task_id, path="output.txt", data=b"Washington D.C")
-
-
-        await self.db.create_artifact(
-            task_id=task_id,
-            step_id=step.step_id,
-            file_name="output.txt",
-            relative_path="",
-            agent_created=True,
-        )
         
-        step.output = "Washington D.C"
+        step = await self.db.create_step(
+            task_id=task_id, input=step_request, additional_input=step_request.additional_input, is_last=False
+        )
 
-        LOG.info(f"\t✅ Final Step completed: {step.step_id}")
+        if len(self.messages) < 2:
+            # Create a new step in the database
 
+            # Log the message
+
+            # Initialize the PromptEngine with the "gpt-3.5-turbo" model
+            prompt_engine = PromptEngine("gpt-3.5-turbo")
+
+            # Load the system and task prompts
+            system_prompt = prompt_engine.load_prompt("system-format")
+
+            # Initialize the messages list with the system prompt
+            self.messages = [{"role": "system", "content": system_prompt}]
+
+            # Define the task parameters
+            task_kwargs = {
+                "task": task.input,
+                "abilities": self.abilities.list_abilities_for_prompt(),
+            }
+
+            # Load the task prompt with the defined task parameters
+            task_prompt = prompt_engine.load_prompt("task-step", **task_kwargs)
+            # Append the task prompt to the messages list
+            self.messages.append({"role": "user", "content": task_prompt})
+
+
+    
+
+        LOG.debug(f"\n\n\nSending the following messages to the model: {pprint.pformat(self.messages)}")
+
+        answer = None
+        try:
+            # Define the parameters for the chat completion request
+            chat_completion_kwargs = {
+                "messages": self.messages,
+                "model": "gpt-3.5-turbo",
+            }
+
+            # Make the chat completion request and parse the response
+            chat_response = await chat_completion_request(**chat_completion_kwargs)
+            answer_content = chat_response["choices"][0]["message"]["content"]
+            if isinstance(answer_content, bytes):
+                answer_content = answer_content.decode('utf-8')
+            answer = json.loads(answer_content)
+           
+            # Log the answer for debugging purposes
+            LOG.debug(f"\n\n\nanswer: {pprint.pformat(answer)}")
+
+
+        except json.JSONDecodeError:
+            # Handle JSON decoding errors
+            LOG.error(f"Unable to decode chat response: {chat_response}")
+        except Exception as e:
+            # Handle other exceptions
+            LOG.error(f"Unable to generate chat response: {e}")
+
+        if not answer:
+            LOG.error("Chat completion did not return a valid answer.")
+            # Handle this scenario - either return or set a default value for 'ability'.
+            return step
+
+        # Extract the ability from the answer
+        ability = answer.get("ability", {})
+
+        if "name" in ability and "args" in ability:
+            # Run the ability and get the output
+            output = await self.abilities.run_ability(
+                task_id, ability["name"], **ability["args"]
+            )
+
+            print("\n\n\noutput legit: ", output)
+
+            if ability["name"] == "finish":
+                step.is_last = True
+                step.status = "completed"
+
+            answer["output"] = output
+
+            # Set the step output to the "speak" part of the answer
+            step.output = answer
+
+     
+            stringified_answer = self.safe_json_dumps(answer)
+            self.messages.append({"role": "assistant", "content": stringified_answer})
+
+
+        else:
+            # Set the step output to the answer
+            step.output = answer
+            stringified_answer = self.safe_json_dumps(answer)
+            self.messages.append({"role": "assistant", "content": stringified_answer})
+
+
+        if len(self.messages) >= 5:
+            step.is_last = True
+
+        # Return the completed step
         return step

@@ -349,6 +349,7 @@ async def execute_agent_task_step(
                 ...
             }
     """
+    
     agent = request["agent"]
     try:
         # An empty step request represents a yes to continue command
