@@ -1,5 +1,7 @@
 import json
+import asyncio
 import pprint
+
 
 from forge.sdk import (
     Agent,
@@ -14,144 +16,136 @@ from forge.sdk import (
     chat_completion_request,
 )
 
-
-
 LOG = ForgeLogger(__name__)
 
+from datetime import datetime
 
+
+class JSONEncoderWithBytes(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, bytes):
+            return obj.decode('utf-8')
+        # Add support for encoding datetime.datetime (or Timestamp) objects
+        if isinstance(obj, datetime):
+            return obj.isoformat()  # Convert to ISO formatted string
+        return super().default(obj)
+    
 class ForgeAgent(Agent):
+    MODEL_NAME = "gpt-3.5-turbo-16k"
+    RETRY_COUNT = 3
+    RETRY_WAIT_SECONDS = 5  # wait for 5 seconds before retrying
 
     def __init__(self, database: AgentDB, workspace: Workspace):
         super().__init__(database, workspace)
 
-    def safe_json_dumps(self, data):
-        """
-        Convert data into a JSON string, ensuring bytes are decoded.
-        """
-        if isinstance(data, dict):
-            for key, value in data.items():
-                if isinstance(value, bytes):
-                    data[key] = value.decode('utf-8')
-        elif isinstance(data, bytes):
-            data = data.decode('utf-8')
-        
-        return json.dumps(data)
-
-
     async def create_task(self, task_request: TaskRequestBody) -> Task:
         task = await super().create_task(task_request)
         self.messages = [] 
-
         LOG.info(
             f"📦 Task created: {task.task_id} input: {task.input[:40]}{'...' if len(task.input) > 40 else ''}"
         )
         return task
     
-
     async def execute_step(self, task_id: str, step_request: StepRequestBody) -> Step:
         task = await self.db.get_task(task_id)
-        print(f"\n\n\ntask: {task} step request: {step_request}")
-
-        
         step = await self.db.create_step(
             task_id=task_id, input=step_request, additional_input=step_request.additional_input, is_last=False
         )
 
+
+        current_files = self.workspace.list(task_id, ".")
+
         if len(self.messages) < 2:
-            # Create a new step in the database
-
-            # Log the message
-
-            # Initialize the PromptEngine with the "gpt-3.5-turbo" model
-            prompt_engine = PromptEngine("gpt-3.5-turbo")
-
-            # Load the system and task prompts
-            system_prompt = prompt_engine.load_prompt("system-format")
-
-            # Initialize the messages list with the system prompt
-            self.messages = [{"role": "system", "content": system_prompt}]
-
-            # Define the task parameters
-            task_kwargs = {
-                "task": task.input,
+            prompt_engine = PromptEngine(self.MODEL_NAME)
+            system_kwargs = {
                 "abilities": self.abilities.list_abilities_for_prompt(),
+                "current_files": current_files
             }
-
-            # Load the task prompt with the defined task parameters
+            task_kwargs = {"task": task.input}
+            system_prompt = prompt_engine.load_prompt("system-format", **system_kwargs)
+            self.messages = [{"role": "system", "content": system_prompt}]
             task_prompt = prompt_engine.load_prompt("task-step", **task_kwargs)
-            # Append the task prompt to the messages list
             self.messages.append({"role": "user", "content": task_prompt})
-
-
-    
 
         LOG.debug(f"\n\n\nSending the following messages to the model: {pprint.pformat(self.messages)}")
 
-        answer = None
-        try:
-            # Define the parameters for the chat completion request
-            chat_completion_kwargs = {
-                "messages": self.messages,
-                "model": "gpt-3.5-turbo",
-            }
 
-            # Make the chat completion request and parse the response
-            chat_response = await chat_completion_request(**chat_completion_kwargs)
-            answer_content = chat_response["choices"][0]["message"]["content"]
-            if isinstance(answer_content, bytes):
-                answer_content = answer_content.decode('utf-8')
-            answer = json.loads(answer_content)
-           
-            # Log the answer for debugging purposes
-            LOG.debug(f"\n\n\nanswer: {pprint.pformat(answer)}")
+        for retry_attempt in range(self.RETRY_COUNT):
+            try:
+                # Chat completion request
+                chat_completion_kwargs = {
+                    "messages": self.messages,
+                    "model": self.MODEL_NAME,
+                    "temperature": 0
+                }
+                chat_response = await chat_completion_request(**chat_completion_kwargs)
 
+                answer_content = chat_response["choices"][0]["message"]["content"]
 
-        except json.JSONDecodeError:
-            # Handle JSON decoding errors
-            LOG.error(f"Unable to decode chat response: {chat_response}")
-        except Exception as e:
-            # Handle other exceptions
-            LOG.error(f"Unable to generate chat response: {e}")
+                # Check if the content is already a dictionary (JSON-like structure)
+                if isinstance(answer_content, dict):
+                    answer = answer_content
+                else:
+                    try:
+                        # If answer_content is bytes, decode it
+                        if isinstance(answer_content, bytes):
+                            answer_content = answer_content.decode('utf-8')
+                        
+                        # Attempt to parse the content as JSON
+                        answer = json.loads(answer_content)
+                        LOG.debug(f"\n\n\nanswer: {pprint.pformat(answer)}")
 
-        if not answer:
-            LOG.error("Chat completion did not return a valid answer.")
-            # Handle this scenario - either return or set a default value for 'ability'.
-            return step
+                    except json.JSONDecodeError:
+                        LOG.error(f"Unable to decode chat response: {chat_response}")
+                        answer = None
 
-        # Extract the ability from the answer
-        ability = answer.get("ability", {})
+                # Ability Sequence Execution
+                ability_sequence = answer.get("abilities_sequence")
+                previous_output = None
 
-        if "name" in ability and "args" in ability:
-            # Run the ability and get the output
-            output = await self.abilities.run_ability(
-                task_id, ability["name"], **ability["args"]
-            )
+                for ability_item in ability_sequence:
+                    ability = ability_item.get("ability", {})
+                    LOG.debug("\n\nin the sequence %s", ability)
 
-            print("\n\n\noutput legit: ", output)
+                    if "name" in ability and "args" in ability:
+                        if previous_output and ability["name"] != "finish":
+                            ability["args"].update({"input": previous_output})
 
-            if ability["name"] == "finish":
-                step.is_last = True
-                step.status = "completed"
+                        output = await self.abilities.run_ability(
+                            task_id, ability["name"], **ability["args"]
+                        )
 
-            answer["output"] = output
+                        LOG.debug("\n\nGot Output for %s : %s", ability["name"], output)
 
-            # Set the step output to the "speak" part of the answer
-            step.output = answer
+                        if ability["name"] == "finish" or "File has been written successfully" in output:
+                            step.is_last = True
+                            step.status = "completed"
 
-     
-            stringified_answer = self.safe_json_dumps(answer)
-            self.messages.append({"role": "assistant", "content": stringified_answer})
+                        step.output = answer
+                        previous_output = output
+                    else:
+                        step.output = answer.get("speak", answer)
 
+                if previous_output and isinstance(previous_output, str):
+                    answer["final_output"] = previous_output
 
-        else:
-            # Set the step output to the answer
-            step.output = answer
-            stringified_answer = self.safe_json_dumps(answer)
-            self.messages.append({"role": "assistant", "content": stringified_answer})
+                # If everything is successful, break out of the retry loop
+                LOG.info("\n\aanswer final %s", answer)
+                break
+            
 
+            except Exception as e:
+                if retry_attempt < self.RETRY_COUNT - 1:
+                    LOG.warning(f"Error occurred in attempt {retry_attempt + 1}. {str(e)}")
+                    await asyncio.sleep(self.RETRY_WAIT_SECONDS)
+                else:
+                    LOG.error(f"Error occurred in the final attempt {retry_attempt + 1}. Giving up.")
+                    raise
 
-        if len(self.messages) >= 5:
+        stringified_answer = json.dumps(answer, cls=JSONEncoderWithBytes)
+        self.messages.append({"role": "assistant", "content": stringified_answer})
+
+        if len(self.messages) >= 4:
             step.is_last = True
 
-        # Return the completed step
         return step

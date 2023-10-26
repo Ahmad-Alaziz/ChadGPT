@@ -1,8 +1,12 @@
 import abc
 import os
 import typing
+import logging
 from pathlib import Path
 import shutil
+from .file_utils import extension_to_parser, read_textual_file, is_file_binary_fn
+
+logger = logging.getLogger(__name__)
 
 
 class Workspace(abc.ABC):
@@ -51,8 +55,19 @@ class LocalWorkspace(Workspace):
         return abs_path
 
     def read(self, task_id: str, path: str) -> bytes:
-        with open(self._resolve_path(task_id, path), "rb") as f:
-            return f.read()
+        abs_path = self._resolve_path(task_id, path)
+
+        try:
+            # Check if the file extension is recognized by the utility parsers
+            if abs_path.suffix.lower() in extension_to_parser or not is_file_binary_fn(abs_path):
+                return read_textual_file(abs_path, logger).encode('utf-8')
+            # For non-textual or unrecognized formats, read as binary
+            else:
+                with open(abs_path, "rb") as f:
+                    return f.read()
+        except Exception as e:
+            logger.error(f"Error reading file {abs_path}: {e}")
+            raise e
 
     def write(self, task_id: str, path: str, data: bytes) -> None:
         with open(self._resolve_path(task_id, path), "wb") as f:
@@ -76,5 +91,6 @@ class LocalWorkspace(Workspace):
     def list(self, task_id: str, path: str) -> typing.List[str]:
         base = self._resolve_path(task_id, path)
         if not base.exists():
-            raise FileNotFoundError(f"Directory or file not found: {base}")
+            return []  # Return an empty list if the directory doesn't exist
         return [str(p.relative_to(self.base_path / task_id)) for p in base.iterdir()]
+
