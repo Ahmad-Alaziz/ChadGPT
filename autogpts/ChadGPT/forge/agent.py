@@ -117,15 +117,18 @@ class ForgeAgent(Agent):
 
                         LOG.debug("\n\nGot Output for %s : %s", ability["name"], output)
 
-                        if ability["name"] == "finish" or "File has been written successfully" in output:
+                        if isinstance(output, bytes):
+                            output_str = output.decode('utf-8')
+                        else:
+                            output_str = output
+
+                        if ability["name"] == "finish" or "File has been written successfully" in output_str:
                             step.is_last = True
                             step.status = "completed"
 
-                        step.output = answer
                         previous_output = output
-                    else:
-                        step.output = answer.get("speak", answer)
 
+                step.output = answer.get("speak","")
                 if previous_output and isinstance(previous_output, str):
                     answer["final_output"] = previous_output
 
